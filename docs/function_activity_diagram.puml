@@ -1,0 +1,159 @@
+@startuml X-Algorithm Function Activity Diagram
+!theme plain
+skinparam backgroundColor #FEFEFE
+
+title X For You Feed - Function Activity Diagram
+
+start
+
+:Thunder PostStore;
+
+partition "insert_posts()" {
+  :Filter posts by retention;
+  :Sort by created_at;
+  :insert_posts_internal();
+}
+
+partition "insert_posts_internal()" {
+  :For each post;
+  if (Check deleted_posts?) then (no)
+    :Insert to posts map;
+    :Create TinyPost;
+    :Add to user timeline;
+    if (Post type?) then (original)
+      :original_posts_by_user;
+    elseif (reply/retweet)
+      :secondary_posts_by_user;
+    else (video)
+      :video_posts_by_user;
+    endif
+  else (yes)
+    :Skip post;
+  endif
+}
+
+partition "get_all_posts_by_users()" {
+  :get_posts_from_map() - original;
+  :get_posts_from_map() - secondary;
+  :Combine results;
+  :Return all_posts;
+}
+
+partition "get_posts_from_map()" {
+  :For each user_id;
+  :Check request_timeout;
+  :Get user timeline;
+  :Iterate posts (newest first);
+  :Filter exclude_tweet_ids;
+  :Lookup full LightPost data;
+  :Filter deleted_posts;
+  :Filter self-retweets;
+  :Filter by following_users;
+  :Apply max_per_user limit;
+  :Collect into results;
+  :Update metrics;
+}
+
+partition "trim_old_posts()" {
+  :Get current_time;
+  :For each timeline;
+  :Check oldest post;
+  if (age > retention_seconds?) then (yes)
+    :Remove from timeline;
+    :Remove from posts map;
+    :Increment trimmed counter;
+  else (no)
+  endif
+  if (timeline empty?) then (yes)
+    :Remove user entry;
+    :Shrink capacity;
+  endif
+  :Return total_trimmed;
+}
+
+:PhoenixScorer;
+
+partition "score()" {
+  :Generate prediction_request_id;
+  :Build TweetInfo for each candidate;
+  :Call phoenix_client.predict();
+  :build_predictions_map();
+  :For each candidate;
+  :Get predictions for tweet_id;
+  :extract_phoenix_scores();
+  :Update candidate with scores;
+  end
+  :Return scored_candidates;
+}
+
+partition "build_predictions_map()" {
+  :Get first distribution_set;
+  :For each candidate_distribution;
+  :Extract tweet_id;
+  :Calculate action_probs;
+  :Extract continuous_values;
+  :Store in predictions_map;
+  end
+}
+
+partition "extract_phoenix_scores()" {
+  :Get favorite_score;
+  :Get reply_score;
+  :Get retweet_score;
+  :Get photo_expand_score;
+  :Get click_score;
+  :Get profile_click_score;
+  :Get vqv_score;
+  :Get share_score;
+  :Get dwell_time_score;
+  :... (8 more action types);
+  :Return PhoenixScores;
+}
+
+:Home Mixer Pipeline;
+
+partition "execute() - 9 Steps" {
+  :Step 1: Query Hydration (Parallel);
+  note right: UserActionSeqQueryHydrator\nUserFeaturesQueryHydrator
+
+  :Step 2: Fetch Candidates (Parallel);
+  note right: ThunderSource\nPhoenixSource
+
+  :Step 3: Hydration (Parallel);
+  note right: 5 hydrators
+
+  :Step 4: Filter (Sequential);
+  note right: 10 filters applied
+
+  :Step 5: Score (Sequential);
+  note right: PhoenixScorer + WeightedScorer\n+ AuthorDiversityScorer + OONScorer
+
+  :Step 6: Selection;
+  note right: TopKScoreSelector
+
+  :Step 7: Post-Selection Hydration (Parallel);
+  note right: VFCandidateHydrator
+
+  :Step 8: Post-Selection Filter (Sequential);
+  note right: VFFilter\nDedupConversationFilter
+
+  :Step 9: Side Effects (Async);
+  note right: CacheRequestInfoSideEffect\nFire and forget
+
+  :Return final candidates;
+}
+
+stop
+
+legend right
+  **Functions**
+  * PostStore: insert_posts, get_all_posts_by_users, trim_old_posts
+  * PhoenixScorer: score, build_predictions_map, extract_phoenix_scores
+  * CandidatePipeline: execute (9 steps)
+
+  **Colors**
+  |<back:#E6F3FF> Component|
+  |<back:#FAFAFA> Process Flow|
+endlegend
+
+@enduml

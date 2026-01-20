@@ -1,0 +1,208 @@
+@startuml X-Algorithm Code Execution Flow
+!theme plain
+skinparam backgroundColor #FEFEFE
+
+title X For You Feed - Code Execution Flow Analysis
+
+actor "User" as user
+participant "Kafka" as kafka
+participant "PostStore" as poststore
+participant "ThunderSource" as thunder
+participant "PhoenixSource" as phoenix_source
+participant "PhoenixScorer" as phoenix_scorer
+participant "CandidatePipeline" as pipeline
+
+== Thunder: In-Memory Post Storage ==
+
+user -> kafka: **1. Post Create Event**
+kafka -> poststore: **2. Kafka Consumer\n(tweet_events_listener_v2.rs)**
+
+note right of poststore
+  **insert_posts() Execution Flow**
+  • Filter posts by retention time
+  • Sort by created_at
+  • Call insert_posts_internal()
+
+  **insert_posts_internal()**
+  • For each post:
+    - Check deleted_posts
+    - Insert to posts map (DashMap)
+    - Create TinyPost reference
+    - Add to user timeline
+    - (original/secondary/video)
+end note
+
+poststore -> poststore: **3. Auto-Trim Background Task**
+note left of poststore
+  • Periodic (every N minutes)
+  • trim_old_posts()
+  • Remove posts > retention_seconds
+end note
+
+== Home Mixer: Candidate Retrieval ==
+
+user -> pipeline: **4. get_candidates() Request**
+
+pipeline -> thunder: **5. get_candidates_by_users()**
+note right of thunder
+  **get_posts_from_map()**
+  • Iterate user_ids
+  • Get TinyPost from user timeline
+  • Lookup full LightPost data
+  • Filter deleted posts
+  • Filter self-retweets
+  • Filter by following_users
+  • Apply max_per_user limit
+  • Timeout check (request_timeout)
+end note
+
+thunder --> pipeline: **6. Return Vec<LightPost>**
+
+pipeline -> phoenix_source: **7. get_candidates()\n(Out-of-Network)**
+phoenix_source --> pipeline: **8. Return OON Candidates**
+
+== Home Mixer: Pipeline Processing ==
+
+== Query Hydration (Parallel) ==
+pipeline -> pipeline: **9. Run Query Hydrators**
+note right of pipeline
+  **UserActionSeqQueryHydrator**
+  • Fetch user action sequence
+  • Build engagement context
+
+  **UserFeaturesQueryHydrator**
+  • Fetch user features from Strato
+end note
+
+== Candidate Hydration (Parallel) ==
+pipeline -> pipeline: **10. Run Hydrators**
+note right of pipeline
+  **InNetworkCandidateHydrator**
+  • Add in-network status
+
+  **CoreDataCandidateHydrator**
+  • Fetch core data (TES Client)
+
+  **VideoDurationCandidateHydrator**
+  • Add video duration
+
+  **SubscriptionHydrator**
+  • Add subscription status
+
+  **GizmoduckCandidateHydrator**
+  • Fetch author info
+end note
+
+== Filter (Sequential) ==
+pipeline -> pipeline: **11. Run Filters**
+note right of pipeline
+  **Filter Order (Sequential)**
+  1. DropDuplicatesFilter
+  2. CoreDataHydrationFilter
+  3. AgeFilter (MAX_POST_AGE)
+  4. SelfTweetFilter
+  5. RetweetDeduplicationFilter
+  6. IneligibleSubscriptionFilter
+  7. PreviouslySeenPostsFilter
+  8. PreviouslyServedPostsFilter
+  9. MutedKeywordFilter
+  10. AuthorSocialgraphFilter
+
+  **Backup & Restore**
+  • Backup candidates before each filter
+  • Restore on error
+  • Log kept/removed counts
+end note
+
+== Score (Sequential) ==
+pipeline -> phoenix_scorer: **12. score()**
+note right of phoenix_scorer
+  **score() Execution Flow**
+   • Generate prediction_request_id
+  • Build TweetInfo for each candidate
+  • Call phoenix_client.predict()
+  • Build predictions_map
+  • Extract phoenix_scores (14 actions)
+
+  **Action Scores**
+  • favorite, reply, retweet
+  • photo_expand, click, profile_click
+  • vqv (video quality view)
+  • share, share_via_dm, share_via_copy_link
+  • dwell_time, quote, quoted_click
+  • follow_author, not_interested
+  • block_author, mute_author, report
+end note
+
+phoenix_scorer --> pipeline: **13. Return Scored Candidates**
+
+== Additional Scorers (Sequential) ==
+pipeline -> pipeline: **14. Run Additional Scorers**
+note right of pipeline
+  **WeightedScorer**
+  • Combine 14 action scores with weights
+  • Apply VQV conditional weighting
+
+  **AuthorDiversityScorer**
+  • Attenuate repeated authors
+  • Decay multiplier per position
+
+  **OONScorer**
+  • Out-of-network score
+end note
+
+== Selection ==
+pipeline -> pipeline: **15. select()**
+note right of pipeline
+  **TopKScoreSelector**
+  • Sort by score
+  • Truncate to top K
+  • Return selected candidates
+end note
+
+== Post-Selection Hydration (Parallel) ==
+pipeline -> pipeline: **16. Run Post-Selection Hydrators**
+note right of pipeline
+  **VFCandidateHydrator**
+  • Run visibility filtering
+end note
+
+== Post-Selection Filter (Sequential) ==
+pipeline -> pipeline: **17. Run Post-Selection Filters**
+note right of pipeline
+   **VFFilter**
+  • Apply visibility filtering
+
+  **DedupConversationFilter**
+  • Remove duplicate conversations
+end note
+
+== Side Effects (Async) ==
+pipeline -> pipeline: **18. run_side_effects()**
+note right of pipeline
+  **CacheRequestInfoSideEffect**
+  • Spawn async task (tokio::spawn)
+  • Don't block response
+  • Fire and forget
+end note
+
+pipeline --> user: **19. Return Final Feed**
+
+legend right
+  **Data Flow Direction**
+  → : Synchronous call
+  --> : Return data
+  ← : Background task
+
+  **Component Types**
+  ■  : Storage (DashMap)
+  ◆  : External Service (gRPC)
+  ▶   : Background Task (tokio)
+  ⚙   : Configuration
+
+  **Execution Pattern**
+  • Parallel : join_all (non-blocking)
+  • Sequential : step-by-step (blocking)
+endlegend
+
+@enduml
