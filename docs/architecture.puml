@@ -1,0 +1,330 @@
+@startuml X-Algorithm Complete Architecture
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam componentStyle rectangle
+
+title X For You Feed Algorithm - Complete Architecture
+
+' =============================================================================
+' EXTERNAL SYSTEMS
+' =============================================================================
+package "External Systems" {
+    database "Kafka" {
+        [Post Events\n(Post Create/Delete)] as kafka
+    }
+    database "User Social Graph" {
+        [Following List\nBlocked/Muted] as social_graph
+    }
+    database "Content Store" {
+        [Post Metadata\nAuthor Info\nMedia Entities] as content_store
+    }
+    actor "User" as user
+    cloud "Global Corpus\n(Millions of Posts)" as global_corpus
+}
+
+' =============================================================================
+' HOME MIXER LAYER (Rust)
+' =============================================================================
+package "Home Mixer (Rust)" #E3F2FD {
+    component "HomeMixerServer\n(gRPC: ScoredPostsService)" as mixer_server {
+        portin "Request" as req_in
+        portout "Response" as resp_out
+    }
+
+    ' Query Hydrators
+    component "Query Hydrators" as query_hydrators {
+        component "UserActionSeqQueryHydrator\n(Engagement History)" as uasqh
+        component "UserFeaturesQueryHydrator\n(Following List)" as ufqh
+    }
+
+    ' Sources
+    component "Candidate Sources" as sources {
+        component "ThunderSource\n(In-Network Posts)" as thunder_src
+        component "PhoenixSource\n(Out-of-Network Posts)" as phoenix_src
+    }
+
+    ' Hydrators
+    component "Candidate Hydrators" as hydrators {
+        component "CoreDataCandidateHydrator\n(Post Text, Media)" as cdc_h
+        component "GizmoduckHydrator\n(Author Info)" as giz_h
+        component "VideoDurationHydrator" as vd_h
+        component "SubscriptionHydrator" as sub_h
+        component "VFCandidateHydrator\n(Visibility Filtering)" as vf_h
+    }
+
+    ' Filters (Pre-Scoring)
+    component "Pre-Scoring Filters" as pre_filters {
+        component "DropDuplicatesFilter" as dup_f
+        component "AgeFilter" as age_f
+        component "SelfTweetFilter" as self_f
+        component "RetweetDeduplicationFilter" as rt_f
+        component "IneligibleSubscriptionFilter" as sub_f
+        component "PreviouslySeenPostsFilter" as seen_f
+        component "PreviouslyServedPostsFilter" as served_f
+        component "MutedKeywordFilter" as muted_f
+        component "AuthorSocialgraphFilter" as social_f
+    }
+
+    ' Scorers
+    component "Scorers" as scorers {
+        component "PhoenixScorer\n(ML Predictions)" as phoenix_scorer
+        component "WeightedScorer\n(Combine Actions)" as weighted_scorer
+        component "AuthorDiversityScorer\n(Attenuate Repeated)" as div_scorer
+        component "OONScorer\n(Out-of-Network)" as oon_scorer
+    }
+
+    ' Selectors
+    component "TopKScoreSelector\n(Sort & Select Top K)" as selector
+
+    ' Filters (Post-Selection)
+    component "Post-Selection Filters" as post_filters {
+        component "VFFilter\n(Deleted/Spam/Violence)" as vf_f
+        component "DedupConversationFilter" as conv_f
+    }
+
+    ' Side Effects
+    component "Side Effects" as side_effects {
+        component "CacheRequestInfoSideEffect" as cache_se
+    }
+}
+
+' =============================================================================
+' THUNDER (Rust) - In-Nemory Post Store
+' =============================================================================
+package "Thunder (Rust)" #FFF3E0 {
+    component "Thunder In-Memory Store" as thunder {
+        storage "Per-User Stores" {
+            component "OriginalPosts" as thunder_orig
+            component "Replies/Reposts" as thunder_rr
+            component "VideoPosts" as thunder_video
+        }
+    }
+    component "Kafka Listener" as kafka_listener {
+        [TweetEventsListener\nTweetEventsListenerV2] as kafka_listeners
+    }
+}
+
+' =============================================================================
+' PHOENIX (Python/JAX) - ML Component
+' =============================================================================
+package "Phoenix (Python/JAX)" #F3E5F5 {
+    component "Phoenix Retrieval\n(Two-Tower Model)" as phoenix_retrieval {
+        component "User Tower\n(User + History → Embedding)" as user_tower
+        component "Candidate Tower\n(Post → Embedding)" as candidate_tower
+        component "ANN Search\n(Dot Product Similarity)" as ann_search
+    }
+
+    component "Phoenix Ranking\n(Transformer Model)" as phoenix_ranking {
+        storage "Hash-Based Embeddings" {
+            component "UserEmbeddings" as user_emb
+            component "HistoryPostEmbeddings" as hist_post_emb
+            component "HistoryAuthorEmbeddings" as hist_auth_emb
+            component "CandidatePostEmbeddings" as cand_post_emb
+            component "CandidateAuthorEmbeddings" as cand_auth_emb
+        }
+
+        component "Grok Transformer\n(Candidate Isolation)" as grok_transformer {
+            component "User Embedding [B,1,D]" as gt_user
+            component "History Embeddings [B,S,D]" as gt_hist
+            component "Candidate Embeddings [B,C,D]" as gt_cand
+            component "Attention Mask\n(Candidates isolated)" as gt_attn
+            component "Layer Norm" as gt_ln
+            component "Unembedding" as gt_unembed
+        }
+    }
+}
+
+' =============================================================================
+' CANDIDATE PIPELINE (Rust) - Framework
+' =============================================================================
+package "Candidate Pipeline (Rust)" #E8F5E9 {
+    component "Pipeline Traits" as cp_traits {
+        interface "Source" as i_source
+        interface "Hydrator" as i_hydrator
+        interface "Filter" as i_filter
+        interface "Scorer" as i_scorer
+        interface "Selector" as i_selector
+        interface "SideEffect" as i_side_effect
+        interface "QueryHydrator" as i_query_hydrator
+    }
+
+    component "PipelineExecutor" as cp_executor {
+        component "QueryHydration\n(Parallel)" as cp_qh
+        component "SourceFetch\n(Parallel)" as cp_sf
+        component "Hydration\n(Parallel)" as cp_h
+        component "Filtering\n(Sequential)" as cp_f
+        component "Scoring\n(Sequential)" as cp_s
+        component "Selection" as cp_sel
+        component "PostSelectionHydration\n(Parallel)" as cp_psh
+        component "PostSelectionFiltering\n(Sequential)" as cp_psf
+        component "SideEffects\n(Async)" as cp_se
+    }
+}
+
+' =============================================================================
+' CONNECTIONS - External to Home Mixer
+' =============================================================================
+user --> req_in : gRPC Request\n(UserID)
+resp_out --> user : Ranked Feed\n(Top K Posts)
+
+kafka_listeners --> kafka : Consume Events
+kafka_listener --> thunder : Ingest Posts
+
+social_graph --> ufqh : Fetch Following List
+
+content_store --> cdc_h : Fetch Post Metadata
+content_store --> giz_h : Fetch Author Info
+
+global_corpus --> phoenix_retrieval : Search Corpus
+
+' =============================================================================
+' CONNECTIONS - Pipeline Flow
+' =============================================================================
+req_in --> query_hydrators : 1. Query Hydration
+
+query_hydrators --> sources : 2. Fetch Candidates
+
+sources --> hydrators : 3. Candidate Hydration
+
+hydrators --> pre_filters : 4. Pre-Scoring Filter
+
+pre_filters --> scorers : 5. Score Candidates
+
+scorers --> selector : 6. Select Top K
+
+selector --> post_filters : 7. Post-Selection Filter
+
+post_filters --> side_effects : 8. Side Effects
+
+side_effects --> resp_out : 9. Return Response
+
+' =============================================================================
+' CONNECTIONS - Thunder
+' =============================================================================
+thunder_src --> thunder : Fetch In-Network\nPosts
+thunder --> thunder_src : Sub-millisecond\nLookup
+
+' =============================================================================
+' CONNECTIONS - Phoenix
+' =============================================================================
+phoenix_src --> phoenix_retrieval : Fetch OON Posts
+phoenix_retrieval --> phoenix_src : Top-K Candidates
+
+phoenix_scorer --> phoenix_ranking : Score Candidates
+
+user_tower --> ann_search : User Embedding
+candidate_tower --> ann_search : Candidate Embeddings
+
+' Hash-based embeddings
+user_emb --> gt_user : User Embeddings
+hist_post_emb --> gt_hist : History Post Embeddings
+hist_auth_emb --> gt_hist : History Author Embeddings
+cand_post_emb --> gt_cand : Candidate Post Embeddings
+cand_auth_emb --> gt_cand : Candidate Author Embeddings
+
+' Transformer flow
+gt_user --> grok_transformer : User Context
+gt_hist --> grok_transformer : Engagement History
+gt_cand --> grok_transformer : Candidates
+gt_attn --> grok_transformer : Attention Mask
+gt_ln --> gt_unembed : Normalized
+gt_unembed --> phoenix_scorer : Action Logits\n[B,C,num_actions]
+
+' =============================================================================
+' CONNECTIONS - Candidate Pipeline Framework
+' =============================================================================
+cp_traits ..> cp_executor : Implements
+
+cp_executor ..> query_hydrators : Uses
+cp_executor ..> sources : Uses
+cp_executor ..> hydrators : Uses
+cp_executor ..> pre_filters : Uses
+cp_executor ..> scorers : Uses
+cp_executor ..> post_filters : Uses
+cp_executor ..> selector : Uses
+cp_executor ..> side_effects : Uses
+
+note right of cp_executor
+  <b>Pipeline Execution Order</b>
+  1. QueryHydration (Parallel)
+  2. SourceFetch (Parallel)
+  3. Hydration (Parallel)
+  4. Filtering (Sequential)
+  5. Scoring (Sequential)
+  6. Selection
+  7. PostSelectionHydration (Parallel)
+  8. PostSelectionFiltering (Sequential)
+  9. SideEffects (Async)
+end note
+
+' =============================================================================
+' NOTES
+' =============================================================================
+note top of phoenix_ranking
+  <b>Phoenix ML Model (Grok-based)</b>
+
+  <b>Retrieval (Two-Tower)</b>:
+  • User Tower: user_features + engagement_history → embedding
+  • Candidate Tower: post_content → embedding
+  • ANN Search: dot_product_similarity(user, candidates)
+
+  <b>Ranking (Transformer)</b>:
+  • Candidate Isolation: candidates CANNOT attend to each other
+  • Multi-Action Prediction:
+    - P(favorite), P(reply), P(repost), P(quote)
+    - P(click), P(profile_click), P(video_view)
+    - P(photo_expand), P(share), P(dwell)
+    - P(follow_author), P(not_interested)
+    - P(block_author), P(mute_author), P(report)
+
+  <b>Hash-Based Embeddings</b>:
+  • Multiple hash functions for lookup
+  • num_user_hashes=2, num_item_hashes=2, num_author_hashes=2
+end note
+
+note bottom of thunder
+  <b>Thunder - In-Network Post Store</b>
+
+  • Kafka events ingestion (post create/delete)
+  • Per-user in-memory stores
+  • Automatic trim based on retention period
+  • Sub-millisecond lookups without DB hit
+end note
+
+note left of pre_filters
+  <b>Pre-Scoring Filters</b>
+  • Drop Duplicates
+  • Age Filter (too old)
+  • Self-Post Filter
+  • Retweet Deduplication
+  • Ineligible Subscription
+  • Previously Seen Posts
+  • Previously Served Posts
+  • Muted Keywords
+  • Blocked/Muted Authors
+end note
+
+note right of scorers
+  <b>Scoring Pipeline</b>
+  1. PhoenixScorer: ML predictions
+  2. WeightedScorer: Σ(weight × P(action))
+  3. AuthorDiversityScorer: attenuate repeated
+  4. OONScorer: adjust out-of-network
+end note
+
+legend right
+  <b>X For You Feed Algorithm</b>
+  Open sourced by xAI (2026)
+
+  <b>Architecture Highlights</b>
+  • No hand-engineered features
+  • Candidate Isolation in ranking
+  • Hash-based embeddings
+  • Multi-action prediction
+  • Composable pipeline
+
+  <b>License</b>
+  Apache License 2.0
+endlegend
+
+@enduml

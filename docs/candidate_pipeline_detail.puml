@@ -1,0 +1,266 @@
+@startuml Candidate Pipeline Framework Detail
+!theme plain
+skinparam backgroundColor #FEFEFE
+
+title Candidate Pipeline Framework - Component Detail
+
+package "Candidate Pipeline Framework (Rust)" #E8F5E9 {
+    interface "Source<Q, C>" as i_source {
+        :enable(query: &Q) -> bool
+        :get_candidates(query: &Q) -> Future<Vec<C>>
+    }
+
+    interface "QueryHydrator<Q>" as i_query_hydrator {
+        :enable(query: &Q) -> bool
+        :hydrate(query: &Q) -> Future<Hydrated>
+        :update(query: &mut Q, hydrated: Hydrated)
+    }
+
+    interface "Hydrator<Q, C>" as i_hydrator {
+        :enable(query: &Q) -> bool
+        :hydrate(query: &Q, candidates: &[C]) -> Future<Vec<Hydrated>>
+        :update_all(candidates: &mut [C], hydrated: Vec<Hydrated>)
+    }
+
+    interface "Filter<Q, C>" as i_filter {
+        :enable(query: &Q) -> bool
+        :filter(query: &Q, candidates: Vec<C>) -> Future<FilterResult>
+    }
+
+    interface "Scorer<Q, C>" as i_scorer {
+        :enable(query: &Q) -> bool
+        :score(query: &Q, candidates: &[C]) -> Future<Vec<Score>>
+        :update_all(candidates: &mut [C], scores: Vec<Score>)
+    }
+
+    interface "Selector<Q, C>" as i_selector {
+        :enable(query: &Q) -> bool
+        :select(query: &Q, candidates: Vec<C>) -> Vec<C>
+    }
+
+    interface "SideEffect<Q, C>" as i_side_effect {
+        :enable(query: &Q) -> bool
+        :run(input: Arc<SideEffectInput>) -> Future<()>
+    }
+}
+
+package "Home Mixer Implementations" #E3F2FD {
+    component "ThunderSource" as impl_thunder_src
+    component "PhoenixSource" as impl_phoenix_src
+
+    component "UserActionSeqQueryHydrator" as impl_uasqh
+    component "UserFeaturesQueryHydrator" as impl_ufqh
+
+    component "CoreDataCandidateHydrator" as impl_cdc_h
+    component "GizmoduckHydrator" as impl_giz_h
+    component "VideoDurationHydrator" as impl_vd_h
+
+    component "AgeFilter" as impl_age_f
+    component "SelfTweetFilter" as impl_self_f
+    component "MutedKeywordFilter" as impl_muted_f
+
+    component "PhoenixScorer" as impl_phoenix_s
+    component "WeightedScorer" as impl_weighted_s
+    component "AuthorDiversityScorer" as impl_div_s
+
+    component "TopKScoreSelector" as impl_selector
+    component "CacheRequestInfoSideEffect" as impl_cache_se
+}
+
+package "Pipeline Execution" #FFF9C4 {
+    rectangle "PipelineExecutor" as executor {
+        rectangle "hydrate_query()" as step1
+        rectangle "fetch_candidates()" as step2
+        rectangle "hydrate()" as step3
+        rectangle "filter()" as step4
+        rectangle "score()" as step5
+        rectangle "select()" as step6
+        rectangle "hydrate_post_selection()" as step7
+        rectangle "filter_post_selection()" as step8
+        rectangle "run_side_effects()" as step9
+    }
+}
+
+' Implementation relationships
+impl_thunder_src ..|> i_source : implements
+impl_phoenix_src ..|> i_source : implements
+
+impl_uasqh ..|> i_query_hydrator : implements
+impl_ufqh ..|> i_query_hydrator : implements
+
+impl_cdc_h ..|> i_hydrator : implements
+impl_giz_h ..|> i_hydrator : implements
+impl_vd_h ..|> i_hydrator : implements
+
+impl_age_f ..|> i_filter : implements
+impl_self_f ..|> i_filter : implements
+impl_muted_f ..|> i_filter : implements
+
+impl_phoenix_s ..|> i_scorer : implements
+impl_weighted_s ..|> i_scorer : implements
+impl_div_s ..|> i_scorer : implements
+
+impl_selector ..|> i_selector : implements
+impl_cache_se ..|> i_side_effect : implements
+
+' Pipeline flow
+step1 -right-> step2 : 1
+step2 -right-> step3 : 2
+step3 -right-> step4 : 3
+step4 -right-> step5 : 4
+step5 -right-> step6 : 5
+step6 -right-> step7 : 6
+step7 -right-> step8 : 7
+step8 -right-> step9 : 8
+
+' Execution notes
+note top of step1
+  <b>1. Query Hydration (Parallel)</b>
+
+  • Filter enabled hydrators
+  • Run all in parallel via join_all
+  • Merge results into query
+  • Continue with hydrated query
+end note
+
+note top of step2
+  <b>2. Fetch Candidates (Parallel)</b>
+
+  • Filter enabled sources
+  • Run all in parallel via join_all
+  • Collect all candidates
+  • Log fetch counts
+end note
+
+note bottom of step3
+  <b>3. Hydration (Parallel)</b>
+
+  • Filter enabled hydrators
+  • Run all in parallel via join_all
+  • Validate output length matches input
+  • Update candidates in-place
+end note
+
+note bottom of step4
+  <b>4. Filter (Sequential)</b>
+
+  • Filter enabled filters
+  • Run sequentially (each sees all candidates)
+  • Backup and restore on error
+  • Log kept/removed counts
+end note
+
+note top of step5
+  <b>5. Score (Sequential)</b>
+
+  • Filter enabled scorers
+  • Run sequentially (each builds on previous)
+  • Validate output length
+  • Update candidates in-place
+end note
+
+note top of step6
+  <b>6. Selection</b>
+
+  • Run selector if enabled
+  • Sort and truncate to top K
+  • Return selected candidates
+end note
+
+note bottom of step7
+  <b>7. Post-Selection Hydration (Parallel)</b>
+
+  • Filter enabled hydrators
+  • Run all in parallel via join_all
+  • Same semantics as step 3
+end note
+
+note bottom of step8
+  <b>8. Post-Selection Filter (Sequential)</b>
+
+  • Filter enabled filters
+  • Run sequentially
+  • Same semantics as step 4
+end note
+
+note left of step9
+  <b>9. Side Effects (Async)</b>
+
+  • Spawn async task via tokio::spawn
+  • Run all in parallel
+  • Don't block response
+  • Fire and forget
+end note
+
+' Trait details
+note right of i_source
+  <b>Source Trait</b>
+
+  Fetches candidates from a data source.
+
+  <b>Methods</b>
+  • enable(): Component enabled?
+  • get_candidates(): Async fetch
+
+  <b>Examples</b>
+  • ThunderSource (in-network)
+  • PhoenixSource (out-of-network)
+end note
+
+note right of i_filter
+  <b>Filter Trait</b>
+
+  Partitions candidates into kept/removed.
+
+  <b>Methods</b>
+  • enable(): Component enabled?
+  • filter(): Async filter
+
+  <b>FilterResult</b>
+  • kept: Vec<C>
+  • removed: Vec<C>
+
+  <b>Examples</b>
+  • AgeFilter (too old)
+  • SelfTweetFilter (own posts)
+  • MutedKeywordFilter
+end note
+
+note right of i_scorer
+  <b>Scorer Trait</b>
+
+  Computes scores for ranking.
+
+  <b>Methods</b>
+  • enable(): Component enabled?
+  • score(): Async scoring
+  • update_all(): Apply to candidates
+
+  <b>Examples</b>
+  • PhoenixScorer (ML predictions)
+  • WeightedScorer (combine actions)
+  • AuthorDiversityScorer
+end note
+
+legend right
+  <b>CandidatePipeline Trait</b>
+
+  Generic over Query (Q) and Candidate (C).
+
+  <b>Required Methods</b>
+  • query_hydrators(): List
+  • sources(): List
+  • hydrators(): List
+  • filters(): List
+  • scorers(): List
+  • selector(): &dyn Selector
+  • post_selection_hydrators(): List
+  • post_selection_filters(): List
+  • side_effects(): Arc<Vec<>>
+  • result_size(): usize
+
+  <b>Main Method</b>
+  • execute(): Run full pipeline
+endlegend
+
+@enduml

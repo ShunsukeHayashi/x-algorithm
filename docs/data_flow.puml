@@ -1,0 +1,201 @@
+@startuml X-Algorithm Data Flow
+!theme plain
+skinparam backgroundColor #FEFEFE
+
+title X For You Feed - Data Flow Diagram
+
+|User|
+start
+:Request For You Feed;
+
+|#AntiqueWhite|Home Mixer|
+:1. QUERY HYDRATION;
+
+partition "Query Hydrators (Parallel)" {
+    :Fetch User Action Sequence\n(engagement history);
+    :Fetch User Features\n(following list, preferences);
+    note right
+      <b>Query Features</b>
+      • user_id
+      • recent_engagements
+      • following_list
+      • muted_keywords
+      • blocked/muted_authors
+    end note
+}
+
+:2. CANDIDATE SOURCING;
+
+partition "Candidate Sources (Parallel)" {
+    |#LightBlue|Thunder|
+    :Fetch In-Network Posts\n(from followed accounts);
+    note right
+      <b>Thunder Source</b>
+      • Sub-millisecond lookup
+      • Recent posts from followers
+      • In-memory store
+    end note
+
+    |#LightGreen|Phoenix Retrieval|
+    :Fetch Out-of-Network Posts\n(ML-based similarity search);
+    note right
+      <b>Phoenix Retrieval</b>
+      • Two-Tower Model
+      • ANN search over global corpus
+      • Top-K candidates
+    end note
+}
+
+:3. CANDIDATE HYDRATION;
+
+partition "Candidate Hydrators (Parallel)" {
+    :Fetch Core Post Data\n(text, media, entities);
+    :Fetch Author Info\n(username, verified status);
+    :Fetch Video Duration;
+    :Fetch Subscription Status;
+    :Fetch Visibility Filter Info;
+    note right
+      <b>Enriched Candidate Features</b>
+      • post_id, text, media
+      • author_id, username, verified
+      • created_at, language
+      • video_duration_ms
+      • is_subscription_content
+    end note
+}
+
+:4. PRE-SCORING FILTERING (Sequential);
+
+repeat
+    :Apply Filter;
+    partition "Filter Chain" {
+        :Drop Duplicates;
+        :Core Data Hydration Check;
+        :Age Filter (remove too old);
+        :Self-Post Filter;
+        :Retweet Deduplication;
+        :Ineligible Subscription Filter;
+        :Previously Seen Posts Filter;
+        :Previously Served Posts Filter;
+        :Muted Keyword Filter;
+        :Author Social Graph Filter;
+    }
+    partition "Filter Result" {
+        :kept_candidates;
+        :removed_candidates;
+    }
+    removed_candidates->removed_posts;
+repeat while (More filters?) is (Yes)
+->No;
+
+:5. SCORING (Sequential);
+
+partition "Scoring Pipeline" {
+    |#LightGreen|Phoenix ML|
+    :Phoenix Scorer;
+    note right
+      <b>Grok Transformer Predictions</b>
+      • P(favorite)
+      • P(reply)
+      • P(repost)
+      • P(quote)
+      • P(click)
+      • P(profile_click)
+      • P(video_view)
+      • P(photo_expand)
+      • P(share)
+      • P(dwell)
+      • P(follow_author)
+      • P(not_interested)
+      • P(block_author)
+      • P(mute_author)
+      • P(report)
+    end note
+
+    :Weighted Scorer;
+    note right
+      <b>Final Score = Σ(weight_i × P(action_i))</b>
+
+      Positive weights:
+      • like, repost, share, follow
+
+      Negative weights:
+      • block, mute, report, not_interested
+    end note
+
+    :Author Diversity Scorer;
+    note right
+      <b>Diversity Penalty</b>
+      Attenuate scores for repeated
+      authors in feed
+    end note
+
+    :OON Scorer;
+    note right
+      <b>Out-of-Network Adjustment</b>
+      Adjust scores for OON content
+    end note
+}
+
+:6. SELECTION;
+
+:Sort by Final Score;
+:Select Top K Candidates;
+note right
+  <b>Selection</b>
+  • Sort descending by score
+  • Select top K (e.g., 50-100)
+  • Prepare for final filtering
+end note
+
+:7. POST-SELECTION HYDRATION;
+
+partition "Post-Selection Hydrators" {
+    :Fetch additional data if needed;
+}
+
+:8. POST-SELECTION FILTERING (Sequential);
+
+partition "Final Filter Chain" {
+    :Visibility Filtering (VFFilter);
+    note right
+      <b>VFFilter Checks</b>
+      • Deleted posts
+      • Spam
+      • Violence
+      • Gore
+      • Policy violations
+    end note
+
+    :Dedup Conversation Filter;
+    note right
+      Remove multiple branches of
+      same conversation thread
+    end note
+}
+
+:9. SIDE EFFECTS (Async);
+
+partition "Async Side Effects" {
+    :Cache Request Info;
+    note right
+      Cache for future requests
+      to improve latency
+    end note
+}
+
+|User|
+:Return Ranked Feed;
+
+stop
+
+legend right
+  <b>Data Flow Notes</b>
+  • Parallel execution where possible
+  • Sequential filtering (each filter sees all candidates)
+  • Sequential scoring (each scorer builds on previous)
+  • Async side effects (don't block response)
+  • Error handling: failed components are skipped
+endlegend
+
+@enduml

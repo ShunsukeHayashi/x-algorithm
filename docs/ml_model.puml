@@ -1,0 +1,228 @@
+@startuml X-Algorithm ML Model Architecture
+!theme plain
+skinparam backgroundColor #FEFEFE
+
+title Phoenix ML Model - Grok-based Transformer Architecture
+
+package "Input Features" #BBDEFB {
+    rectangle "User Hashes\n[B, num_user_hashes]" as user_hashes
+    rectangle "History Post Hashes\n[B, S, num_item_hashes]" as hist_post_hashes
+    rectangle "History Author Hashes\n[B, S, num_author_hashes]" as hist_auth_hashes
+    rectangle "History Actions\n[B, S, num_actions]" as hist_actions
+    rectangle "History Product Surface\n[B, S]" as hist_ps
+    rectangle "Candidate Post Hashes\n[B, C, num_item_hashes]" as cand_post_hashes
+    rectangle "Candidate Author Hashes\n[B, C, num_author_hashes]" as cand_auth_hashes
+    rectangle "Candidate Product Surface\n[B, C]" as cand_ps
+}
+
+package "Hash-Based Embedding Tables" #B3E5FC {
+    database "User Embedding Table" as user_emb_table
+    database "Post Embedding Table" as post_emb_table
+    database "Author Embedding Table" as auth_emb_table
+}
+
+package "Embedding Lookup & Reduction" #C8E6C9 {
+    rectangle "Block User Reduce" as block_user
+    rectangle "Block History Reduce" as block_hist
+    rectangle "Block Candidate Reduce" as block_cand
+
+    note right of block_user
+      <b>Output: [B, 1, D]</b>
+      Concat + Project
+    end note
+
+    note right of block_hist
+      <b>Output: [B, S, D]</b>
+      Post + Author + Action + PS
+      Concat + Project
+    end note
+
+    note right of block_cand
+      <b>Output: [B, C, D]</b>
+      Post + Author + PS
+      Concat + Project
+    end note
+}
+
+package "Transformer Input" #DCEDC8 {
+    rectangle "User Embedding\n[B, 1, D]" as emb_user
+    rectangle "History Embeddings\n[B, S, D]" as emb_hist
+    rectangle "Candidate Embeddings\n[B, C, D]" as emb_cand
+}
+
+package "Grok Transformer" #E1BEE7 {
+    rectangle "Multi-Head Attention\n(with Candidate Isolation)" as attn
+    rectangle "Feed-Forward Network" as ffn
+    rectangle "Layer Norm" as ln1
+    rectangle "Layer Norm" as ln2
+
+    note top of attn
+      <b>Attention Mask Pattern</b>
+
+      Keys →
+         │ User │ Hist │ Cands │
+      ───┼──────┼──────┼───────┤
+      Q U │ ✓   │ ✓✓✓ │ ✗✗✗  │
+      u H │ ✓   │ ✓✓✓ │ ✗✗✗  │
+      e i │ ✓   │ ✓✓✓ │ ✗✗✗  │
+      r s │ ✓   │ ✓✓✓ │ ✗✗✗  │
+      i t │ ✓   │ ✓✓✓ │ ✗✗✗  │
+      e ───┼──────┼──────┼───────┤
+      s  C │ ✓   │ ✓✓✓ │ diag │
+      a  a │ ✓   │ ✓✓✓ │ diag │
+      n n │ ✓   │ ✓✓✓ │ diag │
+      d d │ ✓   │ ✓✓✓ │ diag │
+      s i │ ✓   │ ✓✓✓ │ diag │
+    ▼  d │ ✓   │ ✓✓✓ │ diag │
+      s  │      │      │       │
+
+      ✓ = Can attend
+      ✗ = Cannot attend
+      diag = Self only
+    end note
+}
+
+package "Output Head" #FFCCBC {
+    rectangle "Layer Norm" as ln_out
+    rectangle "Extract Candidate Outputs\n[B, C, D]" as extract_cand
+    rectangle "Unembedding Projection\n[D × num_actions]" as unembed
+    rectangle "Action Logits\n[B, C, num_actions]" as logits
+}
+
+package "Action Predictions" #FFECB3 {
+    rectangle "Positive Actions" as pos_actions {
+        rectangle "P(favorite)" as p_fav
+        rectangle "P(reply)" as p_reply
+        rectangle "P(repost)" as p_rt
+        rectangle "P(quote)" as p_quote
+        rectangle "P(click)" as p_click
+        rectangle "P(profile_click)" as p_pc
+        rectangle "P(video_view)" as p_vv
+        rectangle "P(photo_expand)" as p_pe
+        rectangle "P(share)" as p_share
+        rectangle "P(follow_author)" as p_follow
+    }
+
+    rectangle "Negative Actions" as neg_actions {
+        rectangle "P(not_interested)" as p_ni
+        rectangle "P(block_author)" as p_block
+        rectangle "P(mute_author)" as p_mute
+        rectangle "P(report)" as p_report
+    }
+}
+
+' Connections
+user_hashes --> user_emb_table : Lookup
+hist_post_hashes --> post_emb_table : Lookup
+hist_auth_hashes --> auth_emb_table : Lookup
+cand_post_hashes --> post_emb_table : Lookup
+cand_auth_hashes --> auth_emb_table : Lookup
+
+user_emb_table --> block_user
+hist_ps --> block_hist
+hist_actions --> block_hist
+post_emb_table --> block_hist
+auth_emb_table --> block_hist
+
+cand_ps --> block_cand
+post_emb_table --> block_cand
+auth_emb_table --> block_cand
+
+block_user --> emb_user
+block_hist --> emb_hist
+block_cand --> emb_cand
+
+emb_user --> attn
+emb_hist --> attn
+emb_cand --> attn
+
+attn --> ln1
+ln1 --> ffn
+ffn --> ln2
+
+ln2 --> ln_out
+ln_out --> extract_cand
+extract_cand --> unembed
+unembed --> logits
+
+logits --> pos_actions : Split
+logits --> neg_actions : Split
+
+' Notes
+note bottom of pos_actions
+  <b>Positive Weights</b>
+  These contribute positively
+  to final score
+
+  Score += Σ(weight × P(action))
+end note
+
+note bottom of neg_actions
+  <b>Negative Weights</b>
+  These subtract from final score
+  to suppress unwanted content
+
+  Score -= Σ(weight × P(action))
+end note
+
+note left of block_user
+  <b>Block User Reduce</b>
+
+  Input: [B, num_user_hashes, D]
+  Reshape: [B, 1, num_user_hashes × D]
+  Project: [B, 1, D]
+
+  Projection matrix: [num_user_hashes×D, D]
+  Default: num_user_hashes = 2
+end note
+
+note left of block_hist
+  <b>Block History Reduce</b>
+
+  Concatenate:
+  - Post embeddings [B, S, num_item×D]
+  - Author embeddings [B, S, num_auth×D]
+  - Action embeddings [B, S, D]
+  - Product surface embeddings [B, S, D]
+
+  Project: [B, S, D]
+
+  Default: num_item_hashes = 2
+          num_author_hashes = 2
+end note
+
+note left of block_cand
+  <b>Block Candidate Reduce</b>
+
+  Concatenate:
+  - Post embeddings [B, C, num_item×D]
+  - Author embeddings [B, C, num_auth×D]
+  - Product surface embeddings [B, C, D]
+
+  Project: [B, C, D]
+
+  Default: num_item_hashes = 2
+          num_author_hashes = 2
+end note
+
+legend right
+  <b>Phoenix Model Config</b>
+
+  • Transformer: Grok-1 based
+  • emb_size: D (embedding dimension)
+  • history_seq_len: S (default 128)
+  • candidate_seq_len: C (default 32)
+  • num_actions: 14
+  • num_user_hashes: 2
+  • num_item_hashes: 2
+  • num_author_hashes: 2
+  • fprop_dtype: bfloat16
+
+  <b>Key Features</b>
+  • Candidate isolation in attention
+  • Hash-based embedding lookup
+  • Multi-action prediction
+  • Shared embedding tables
+endlegend
+
+@enduml

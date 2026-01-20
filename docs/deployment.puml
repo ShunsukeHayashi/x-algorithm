@@ -1,0 +1,219 @@
+@startuml X-Algorithm Deployment Architecture
+!theme plain
+skinparam backgroundColor #FEFEFE
+
+title X For You Feed - Deployment Architecture
+
+actor "User (Mobile/Web)" as user
+
+cloud "X Platform" {
+    node "Load Balancer" as lb
+
+    node "Home Mixer Cluster" #E3F2FD {
+        component "HomeMixer Pod 1" as mixer1 {
+            component "gRPC Server" as grpc1
+            component "Candidate Pipeline" as cp1
+        }
+        component "HomeMixer Pod 2" as mixer2 {
+            component "gRPC Server" as grpc2
+            component "Candidate Pipeline" as cp2
+        }
+        component "HomeMixer Pod N" as mixerN {
+            component "gRPC Server" as grpcN
+            component "Candidate Pipeline" as cpN
+        }
+    }
+
+    node "Thunder Cluster" #FFF3E0 {
+        component "Thunder Instance 1" as thunder1 {
+            storage "In-Memory Store 1" as store1
+            component "Kafka Consumer 1" as kafka1
+        }
+        component "Thunder Instance 2" as thunder2 {
+            storage "In-Memory Store 2" as store2
+            component "Kafka Consumer 2" as kafka2
+        }
+        component "Thunder Instance N" as thunderN {
+            storage "In-Memory Store N" as storeN
+            component "Kafka Consumer N" as kafkaN
+        }
+    }
+
+    node "Phoenix Cluster" #F3E5F5 {
+        component "Phoenix Retriever 1" as ret1 {
+            component "User Tower" as ut1
+            component "ANN Index" as ann1
+        }
+        component "Phoenix Retriever 2" as ret2 {
+            component "User Tower" as ut2
+            component "ANN Index" as ann2
+        }
+        component "Phoenix Ranker 1" as rank1 {
+            component "Grok Transformer\n(JAX/TPU)" as grok1
+        }
+        component "Phoenix Ranker 2" as rank2 {
+            component "Grok Transformer\n(JAX/TPU)" as grok2
+        }
+    }
+}
+
+cloud "Data Plane" {
+    queue "Kafka Cluster" as kafka {
+        component "Post Events Topic" as post_topic
+    }
+    database "Social Graph DB" as social_db
+    database "Content Store DB" as content_db
+    database "Cache Cluster\n(Redis/Memcached)" as cache
+}
+
+database "External Services" {
+    database "Gizmoduck\n(User Service)" as gizmoduck
+    database "Visibility Filter\n(Safety Service)" as vf
+}
+
+' Connections
+user --> lb : HTTPS/gRPC
+lb --> grpc1 : gRPC
+lb --> grpc2 : gRPC
+lb --> grpcN : gRPC
+
+' Mixer to Thunder
+cp1 --> thunder1 : gRPC/Thrift
+cp1 --> thunder2 : gRPC/Thrift
+cp2 --> thunder1 : gRPC/Thrift
+cp2 --> thunder2 : gRPC/Thrift
+cpN --> thunderN : gRPC/Thrift
+
+' Mixer to Phoenix
+cp1 --> ret1 : gRPC
+cp1 --> rank1 : gRPC
+cp2 --> ret2 : gRPC
+cp2 --> rank2 : gRPC
+cpN --> ret1 : gRPC
+cpN --> rank2 : gRPC
+
+' Thunder to Kafka
+kafka1 --> post_topic : Consume
+kafka2 --> post_topic : Consume
+kafkaN --> post_topic : Consume
+
+' Mixer to Data Plane
+cp1 --> social_db : Query
+cp1 --> content_db : Query
+cp1 --> cache : Read/Write
+cp2 --> social_db : Query
+cp2 --> content_db : Query
+cp2 --> cache : Read/Write
+
+' Mixer to External Services
+cp1 --> gizmoduck : Author Info
+cp1 --> vf : Safety Check
+
+' Notes
+note top of lb
+  <b>Client Request Flow</b>
+  1. User opens For You feed
+  2. Request hits Load Balancer
+  3. LB routes to Home Mixer Pod
+  4. Mixer processes and returns feed
+end note
+
+note right of mixer1
+  <b>Home Mixer Pod</b>
+
+  Technology: Rust
+  Protocol: gRPC
+  Port: 14534
+
+  Dependencies:
+  • Thunder (in-network posts)
+  • Phoenix (OON posts + scoring)
+  • Social Graph DB
+  • Content Store DB
+
+  Typical latency: ~100-200ms
+end note
+
+note left of thunder1
+  <b>Thunder Instance</b>
+
+  Technology: Rust
+  Storage: In-memory
+  Retention: Configurable
+
+  Responsibilities:
+  • Consume Kafka post events
+  • Maintain per-user post stores
+  • Serve in-network candidates
+
+  Lookup latency: <1ms
+end note
+
+note right of ret1
+  <b>Phoenix Retriever</b>
+
+  Technology: Python/JAX
+  Model: Two-Tower
+
+  Responsibilities:
+  • Generate user embedding
+  • ANN search for candidates
+
+  Latency: ~10-50ms
+  Throughput: Millions → ~1000
+end note
+
+note right of rank1
+  <b>Phoenix Ranker</b>
+
+  Technology: Python/JAX
+  Model: Grok Transformer
+  Hardware: TPU/GPU
+
+  Responsibilities:
+  • Score candidates
+  • Predict engagement probs
+
+  Latency: ~20-100ms
+  Batch size: ~50-100 candidates
+end note
+
+note bottom of kafka
+  <b>Kafka Cluster</b>
+
+  Post Events Topic:
+  • Post create events
+  • Post delete events
+
+  Consumers:
+  • All Thunder instances
+
+  Partitioning: By user_id
+  Replication: 3+
+end note
+
+legend right
+  <b>Deployment Characteristics</b>
+
+  <b>Scalability</b>
+  • Horizontal pod autoscaling
+  • Stateless services (mixer, phoenix)
+  • Stateful services (thunder) sharded
+
+  <b>Availability</b>
+  • Multi-AZ deployment
+  • Health checks and readiness probes
+  • Graceful shutdown
+
+  <b>Performance</b>
+  • Sub-second end-to-end latency
+  • In-memory stores for hot data
+  • Hardware acceleration for ML
+
+  <b>Reliability</b>
+  • Circuit breakers for downstream
+  • Timeout and retry policies
+  • Graceful degradation
+endlegend
+
+@enduml

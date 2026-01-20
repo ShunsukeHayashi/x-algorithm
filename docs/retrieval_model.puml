@@ -1,0 +1,223 @@
+@startuml X-Algorithm Retrieval Model
+!theme plain
+skinparam backgroundColor #FEFEFE
+
+title Phoenix Retrieval - Two-Tower Model Architecture
+
+package "Input Features" #BBDEFB {
+    rectangle "User Features" as user_feat {
+        rectangle "User ID" as uid
+        rectangle "Following List" as following
+        rectangle "Recent Engagements" as engagements
+    }
+
+    rectangle "Candidate Features" as cand_feat {
+        rectangle "Post ID" as pid
+        rectangle "Post Content" as content
+        rectangle "Author ID" as aid
+        rectangle "Media Type" as media
+    }
+}
+
+package "User Tower" #C8E6C9 {
+    rectangle "User Hash Functions" as user_hash {
+        rectangle "Hash Function 1" as uh1
+        rectangle "Hash Function 2" as uh2
+    }
+
+    database "User Embedding Table" as user_emb_table
+    database "History Post Embedding Table" as hist_post_emb_table
+    database "History Author Embedding Table" as hist_auth_emb_table
+
+    rectangle "User Embedding Lookup" as user_lookup
+    rectangle "History Post Embedding Lookup" as hist_post_lookup
+    rectangle "History Author Embedding Lookup" as hist_auth_lookup
+
+    rectangle "Aggregate Embeddings" as agg_user
+    rectangle "User Transformer" as user_transformer
+    rectangle "Layer Norm" as user_ln
+    rectangle "L2 Normalize" as user_norm
+
+    rectangle "User Embedding\n[D-dimensional]" as user_embedding
+}
+
+package "Candidate Tower" #FFCCBC {
+    rectangle "Candidate Hash Functions" as cand_hash {
+        rectangle "Hash Function 1" as ch1
+        rectangle "Hash Function 2" as ch2
+    }
+
+    database "Post Embedding Table" as post_emb_table
+    database "Author Embedding Table" as auth_emb_table
+
+    rectangle "Post Embedding Lookup" as post_lookup
+    rectangle "Author Embedding Lookup" as auth_lookup
+
+    rectangle "Aggregate Embeddings" as agg_cand
+    rectangle "Candidate Transformer" as cand_transformer
+    rectangle "Layer Norm" as cand_ln
+    rectangle "L2 Normalize" as cand_norm
+
+    rectangle "Candidate Embedding\n[D-dimensional]" as cand_embedding
+}
+
+package "ANN Index (Pre-computed)" #FFF59D {
+    storage "Candidate Embeddings\n[N × D]" as ann_index
+    component "Approximate Nearest Neighbor\n(HNSW/FAISS)" as ann_search
+}
+
+package "Retrieval Output" #E1BEE7 {
+    rectangle "Top-K Candidates" as topk
+    rectangle "Candidate IDs" as cand_ids
+    rectangle "Similarity Scores" as sim_scores
+}
+
+' User Tower Flow
+uid --> uh1 : Hash
+uid --> uh2 : Hash
+following --> user_lookup
+engagements --> hist_post_lookup
+engagements --> hist_auth_lookup
+
+uh1 --> user_emb_table : Index
+uh2 --> user_emb_table : Index
+user_emb_table --> user_lookup : Lookup
+hist_post_emb_table --> hist_post_lookup : Lookup
+hist_auth_emb_table --> hist_auth_lookup : Lookup
+
+user_lookup --> agg_user
+hist_post_lookup --> agg_user
+hist_auth_lookup --> agg_user
+
+agg_user --> user_transformer
+user_transformer --> user_ln
+user_ln --> user_norm
+user_norm --> user_embedding
+
+' Candidate Tower Flow (for indexing)
+pid --> ch1 : Hash
+pid --> ch2 : Hash
+content --> post_lookup
+aid --> auth_lookup
+aid --> ch1 : Hash
+aid --> ch2 : Hash
+
+ch1 --> post_emb_table : Index
+ch2 --> post_emb_table : Index
+post_emb_table --> post_lookup : Lookup
+
+ch1 --> auth_emb_table : Index
+ch2 --> auth_emb_table : Index
+auth_emb_table --> auth_lookup : Lookup
+
+post_lookup --> agg_cand
+auth_lookup --> agg_cand
+
+agg_cand --> cand_transformer
+cand_transformer --> cand_ln
+cand_ln --> cand_norm
+cand_norm --> cand_embedding
+
+' ANN Index Flow
+cand_embedding --> ann_index : Store all\n[N = millions]
+
+' Similarity Search
+user_embedding --> ann_search : Query vector
+ann_index --> ann_search : Search space
+ann_search --> topk : Top-K results
+ann_search --> cand_ids : Retrieved IDs
+ann_search --> sim_scores : Dot product\nsimilarities
+
+' Notes
+note top of user_embedding
+  <b>User Tower Output</b>
+
+  Normalized D-dimensional vector
+  representing user interests based on:
+  • Who they follow
+  • What they engaged with
+  • Engagement types (like, reply, etc.)
+end note
+
+note bottom of cand_embedding
+  <b>Candidate Tower Output</b>
+
+  Normalized D-dimensional vector
+  representing post content:
+  • Text content
+  • Author information
+  • Media type
+  • Metadata
+end note
+
+note right of ann_search
+  <b>ANN Search</b>
+
+  Approximate Nearest Neighbor
+  search using:
+  • HNSW (Hierarchical Navigable
+    Small World) or
+  • FAISS (Facebook AI Similarity
+    Search)
+
+  Retrieves top-K most similar
+  candidates to user embedding
+
+  Similarity = dot_product(user, candidate)
+             = cosine_similarity
+             (both normalized)
+end note
+
+note left of agg_user
+  <b>User Embedding Aggregate</b>
+
+  Multiple hash embeddings combined:
+  • User hash (2 hashes)
+  • History post hashes (2 hashes each)
+  • History author hashes (2 hashes each)
+
+  Total: 1 + 2×S + 2×S embeddings
+  where S = history sequence length
+end note
+
+note left of agg_cand
+  <b>Candidate Embedding Aggregate</b>
+
+  Multiple hash embeddings combined:
+  • Post hash (2 hashes)
+  • Author hash (2 hashes)
+
+  Total: 4 embeddings per candidate
+end note
+
+legend right
+  <b>Two-Tower Retrieval Model</b>
+
+  <b>Purpose</b>
+  Efficiently narrow millions of
+  candidates to hundreds using
+  approximate similarity search
+
+  <b>Key Properties</b>
+  • User and candidate towers
+    are independent
+  • Candidate embeddings can be
+    pre-computed and indexed
+  • User embedding computed
+    on-demand per request
+  • L2 normalization enables
+    cosine similarity via dot product
+
+  <b>Hash-Based Embeddings</b>
+  • num_user_hashes: 2
+  • num_item_hashes: 2
+  • num_author_hashes: 2
+  • Multiple hashes reduce collision
+    and improve representation
+
+  <b>ANN Search</b>
+  • Sub-millisecond latency
+  • Millions of candidates → ~1000
+endlegend
+
+@enduml
