@@ -1,0 +1,106 @@
+@startuml X-Algorithm パフォーマンスレイテンシ内訳
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam handwritten false
+
+title X-Algorithm エンドツーエンド レイテンシ内訳
+
+|Thunder In-Network|
+start
+:DashMap get\n<1μs × N users;
+note right
+  - O(1) ハッシュ検索
+  - ロックフリー読み取り
+  - Sharded concurrency
+end note
+:VecDeque reverse iter\nO(1) per element;
+note right
+  - MAX_ORIGINAL_POSTS_PER_AUTHOR = 1000
+  - MAX_REPLY_POSTS_PER_AUTHOR = 200
+  - MAX_TINY_POSTS_PER_USER_SCAN = 5000
+end note
+:会話フィルタリング\nO(depth) per reply;
+:spawn_blocking\n<1ms overhead;
+stop
+
+|Phoenix ML Pipeline|
+start
+:Hash-based Embeddings\nO(1) lookup;
+note right
+  - num_user_hashes = 2
+  - num_item_hashes = 2
+  - num_author_hashes = 2
+  - メモリ効率化
+end note
+:Two-Tower ANN検索\n~10-50ms;
+note right
+  - 近似最近傍探索
+  - FAISS/HNSWインデックス
+  - 候補数: 100-500
+end note
+:Grok Transformer推論\n~20-100ms;
+note right
+  - バッチサイズ: 50-100
+  - history_seq_len = 128
+  - candidate_seq_len = 32
+  - Multi-Query Attention
+end note
+:候補間独立スコアリング\n並列化可能;
+stop
+
+|Home Mixer Pipeline|
+start
+:Step 1: Query Hydration\nParallel ~5-20ms;
+note right
+  - UserActionSeqQueryHydrator
+  - UserFeaturesQueryHydrator
+  - 複数クライアント並列呼び出し
+end note
+:Step 2: Fetch Candidates\nParallel ~20-60ms;
+note right
+  - ThunderSource (In-Network)
+  - PhoenixSource (Out-of-Network)
+  - gRPC並列呼び出し
+end note
+:Step 3: Hydration\nParallel ~10-30ms;
+note right
+  - 5つのHydrator並列実行
+  - CoreData, VideoDuration,
+    Subscription, Gizmoduck
+end note
+:Step 4: Filter\nSequential ~5-15ms;
+note right
+  - 10個のフィルタ逐次実行
+  - DropDuplicates, CoreData,
+    Age, SelfTweet, RetweetDedup,
+    Subscription, PreviouslySeen,
+    PreviouslyServed, MutedKeyword,
+    Socialgraph
+end note
+:Step 5: Score\nSequential ~30-100ms;
+note right
+  - PhoenixScorer (ML予測)
+  - WeightedScorer
+  - AuthorDiversityScorer
+  - OONScorer
+end note
+:Step 6: Selection\nTopK ~1ms;
+:Step 7: Post-Sel Hydration\nParallel ~5-15ms;
+:Step 8: Post-Sel Filter\nSequential ~2-5ms;
+:Step 9: Side Effects\nAsync Fire & Forget;
+stop
+
+|総合レイテンシ|
+start
+:Thunder: ~1-10ms;
+:Phoenix Retrieval: ~10-50ms;
+:Phoenix Scoring: ~20-100ms;
+:Home Mixer Pipeline: ~100-300ms;
+note right
+  エンドツーエンド合計:
+  ~150-500ms (P50)
+  ~300-1000ms (P99)
+end note
+stop
+
+@enduml
